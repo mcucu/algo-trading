@@ -46,6 +46,8 @@ input double InpMaxDailyLossPercent = 3.0;
 
 //--- Debug
 input bool   DebugLog           = true;
+input int    SkipAfterConsecutiveSL = 2;
+input int    SkipDurationMinutes     = 60;
 
 //--- Magic
 input int MagicNumber = 20251220;
@@ -53,6 +55,8 @@ input int MagicNumber = 20251220;
 //=============== GLOBAL =================
 datetime lastBarTime=0;
 double DayStartBalance = 0;
+int ConsecutiveSLCount = 0;
+datetime SkipTradeUntil = 0;
 
 //=============== UTIL ===================
 double Pip(){
@@ -209,6 +213,17 @@ bool NearSR()
 //=============== ENTRY ==================
 void CheckEntry()
 {
+   if(TimeCurrent() < SkipTradeUntil)
+   {
+      if(DebugLog)
+      {
+         int secLeft = (int)(SkipTradeUntil - TimeCurrent());
+         int minLeft = (secLeft + 59) / 60;
+         Print("[NO TRADE] Cooldown after consecutive SL, remaining ", minLeft, " min");
+      }
+      return;
+   }
+
    if(DailyLossExceeded())
    {
       if(DebugLog) Print("[LOCKED] Daily loss exceeded");
@@ -313,5 +328,43 @@ void OnTick()
    {
       lastBarTime=t;
       CheckEntry();
+   }
+}
+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
+      return;
+
+   ulong dealTicket = trans.deal;
+   if(dealTicket == 0 || !HistoryDealSelect(dealTicket))
+      return;
+
+   string symbol = HistoryDealGetString(dealTicket, DEAL_SYMBOL);
+   long magic    = HistoryDealGetInteger(dealTicket, DEAL_MAGIC);
+   long entry    = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+   long reason   = HistoryDealGetInteger(dealTicket, DEAL_REASON);
+
+   if(symbol != InpSymbol || magic != MagicNumber || entry != DEAL_ENTRY_OUT)
+      return;
+
+   if(reason == DEAL_REASON_SL)
+   {
+      ConsecutiveSLCount++;
+      if(DebugLog) Print("[SL TRACK] Consecutive SL = ", ConsecutiveSLCount);
+
+      if(ConsecutiveSLCount >= SkipAfterConsecutiveSL)
+      {
+         SkipTradeUntil = TimeCurrent() + (SkipDurationMinutes * 60);
+         if(DebugLog) Print("[COOLDOWN] Triggered for ", SkipDurationMinutes, " minutes until ", TimeToString(SkipTradeUntil, TIME_DATE|TIME_SECONDS));
+         ConsecutiveSLCount = 0;
+      }
+   }
+   else
+   {
+      ConsecutiveSLCount = 0;
+      if(DebugLog) Print("[SL TRACK] Reset, close reason = ", reason);
    }
 }
