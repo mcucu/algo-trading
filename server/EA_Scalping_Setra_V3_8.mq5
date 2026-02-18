@@ -48,6 +48,10 @@ input double InpMaxDailyLossPercent = 3.0;
 input bool   DebugLog           = true;
 input int    SkipAfterConsecutiveSL = 2;
 input int    SkipDurationMinutes     = 60;
+input bool   UseRangingFilter        = true;
+input int    RangingLookbackBars     = 20;
+input double RangingMaxADX           = 18.0;
+input double RangingRangeATRMult     = 1.8;
 
 //--- Magic
 input int MagicNumber = 20251220;
@@ -188,6 +192,53 @@ bool MomentumBear(double &body)
    return (c<o && body>=minBody && wick/(body+wick)<=MaxWickRatio);
 }
 
+double GetADX()
+{
+   static int adxHandle = INVALID_HANDLE;
+
+   if(adxHandle == INVALID_HANDLE)
+   {
+      adxHandle = iADX(InpSymbol, PERIOD_M5, 14);
+      if(adxHandle == INVALID_HANDLE)
+      {
+         Print("ERROR: Failed create ADX handle");
+         return 0.0;
+      }
+   }
+
+   double adxBuf[];
+   if(CopyBuffer(adxHandle, 0, 1, 1, adxBuf) <= 0)
+   {
+      Print("ERROR: Failed copy ADX buffer");
+      return 0.0;
+   }
+
+   return adxBuf[0];
+}
+
+bool IsRangingMarket()
+{
+   if(!UseRangingFilter) return false;
+
+   double atr = GetATR();
+   if(atr <= 0.0) return false;
+
+   int bars = MathMax(5, RangingLookbackBars);
+   double hh = GetHigh(PERIOD_M5, bars, 1);
+   double ll = GetLow (PERIOD_M5, bars, 1);
+   double span = hh - ll;
+
+   bool rangeCompressed = (span <= (atr * RangingRangeATRMult));
+
+   double adx = GetADX();
+   bool weakTrend = (adx > 0.0 && adx <= RangingMaxADX);
+
+   if(DebugLog && (rangeCompressed || weakTrend))
+      Print("[NO TRADE] Ranging market detected | span=", span, " atr=", atr, " adx=", adx);
+
+   return (rangeCompressed || weakTrend);
+}
+
 bool DailyLossExceeded()
 {
    if(!InpUseDailyLossLock) return false;
@@ -234,6 +285,12 @@ void CheckEntry()
    {
      if(DebugLog) Print("[NO TRADE] Reached max position");
      return; 
+   }
+
+   if(IsRangingMarket())
+   {
+      if(DebugLog) Print("[NO TRADE] RangingMarket");
+      return;
    }
 
    double body=0;
