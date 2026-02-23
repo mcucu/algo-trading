@@ -52,6 +52,12 @@ input bool   UseRangingFilter        = true;
 input int    RangingLookbackBars     = 20;
 input double RangingMaxADX           = 18.0;
 input double RangingRangeATRMult     = 1.8;
+input int    RangingMinSignals       = 2;
+input int    RangingEMAPeriod        = 50;
+input int    RangingEMASlopeBars     = 8;
+input double RangingMaxEMASlopePip   = 8.0;
+input int    RangingBodyAvgBars      = 10;
+input double RangingMaxBodyATRMult   = 0.55;
 
 //--- Magic
 input int MagicNumber = 20251220;
@@ -216,6 +222,32 @@ double GetADX()
    return adxBuf[0];
 }
 
+double GetEMA(int period,int shift)
+{
+   static int emaHandle = INVALID_HANDLE;
+   static int emaPeriod = -1;
+
+   if(emaHandle == INVALID_HANDLE || emaPeriod != period)
+   {
+      emaHandle = iMA(InpSymbol, PERIOD_M5, period, 0, MODE_EMA, PRICE_CLOSE);
+      emaPeriod = period;
+      if(emaHandle == INVALID_HANDLE)
+      {
+         Print("ERROR: Failed create EMA handle");
+         return 0.0;
+      }
+   }
+
+   double emaBuf[];
+   if(CopyBuffer(emaHandle, 0, shift, 1, emaBuf) <= 0)
+   {
+      Print("ERROR: Failed copy EMA buffer");
+      return 0.0;
+   }
+
+   return emaBuf[0];
+}
+
 bool IsRangingMarket()
 {
    if(!UseRangingFilter) return false;
@@ -229,14 +261,40 @@ bool IsRangingMarket()
    double span = hh - ll;
 
    bool rangeCompressed = (span <= (atr * RangingRangeATRMult));
-
    double adx = GetADX();
    bool weakTrend = (adx > 0.0 && adx <= RangingMaxADX);
+   int emaSlopeBars = MathMax(2, RangingEMASlopeBars);
+   double emaNow = GetEMA(MathMax(5, RangingEMAPeriod), 1);
+   double emaPast = GetEMA(MathMax(5, RangingEMAPeriod), 1 + emaSlopeBars);
+   double emaSlopePip = 0.0;
+   bool flatEMA = false;
+   if(emaNow > 0.0 && emaPast > 0.0)
+   {
+      emaSlopePip = MathAbs(emaNow - emaPast) / Pip();
+      flatEMA = (emaSlopePip <= RangingMaxEMASlopePip);
+   }
 
-   if(DebugLog && (rangeCompressed || weakTrend))
-      Print("[NO TRADE] Ranging market detected | span=", span, " atr=", atr, " adx=", adx);
+   int bodyBars = MathMax(5, RangingBodyAvgBars);
+   double avgBody = AvgBody(bodyBars);
+   bool smallBody = (avgBody <= atr * RangingMaxBodyATRMult);
 
-   return (rangeCompressed || weakTrend);
+   int signals = 0;
+   if(rangeCompressed) signals++;
+   if(weakTrend) signals++;
+   if(flatEMA) signals++;
+   if(smallBody) signals++;
+
+   int minSignals = MathMax(1, MathMin(4, RangingMinSignals));
+   bool ranging = (signals >= minSignals);
+
+   if(DebugLog && ranging)
+   {
+      Print("[NO TRADE] Ranging detected | signals=", signals,
+            " span=", span, " atr=", atr, " adx=", adx,
+            " emaSlopePip=", emaSlopePip, " avgBody=", avgBody);
+   }
+
+   return ranging;
 }
 
 bool DailyLossExceeded()
