@@ -43,6 +43,8 @@ input double HTF_Bypass_Mult    = 1.2;
 // --- Daily Loss Lock
 input bool   InpUseDailyLossLock = true;
 input double InpMaxDailyLossPercent = 3.0;
+input bool   InpUseDailyTradeLimit = true;
+input int    InpMaxDailyTrades     = 8;
 
 //--- Debug
 input bool   DebugLog           = true;
@@ -306,6 +308,56 @@ bool DailyLossExceeded()
    return (dd >= InpMaxDailyLossPercent);
 }
 
+datetime GetDayStart(datetime t)
+{
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   dt.hour = 0;
+   dt.min  = 0;
+   dt.sec  = 0;
+   return StructToTime(dt);
+}
+
+int CountTodayTrades()
+{
+   datetime now = TimeCurrent();
+   datetime dayStart = GetDayStart(now);
+
+   if(!HistorySelect(dayStart, now))
+      return 0;
+
+   int trades = 0;
+   int deals = HistoryDealsTotal();
+   for(int i=0; i<deals; i++)
+   {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0)
+         continue;
+
+      string sym = HistoryDealGetString(ticket, DEAL_SYMBOL);
+      long magic = HistoryDealGetInteger(ticket, DEAL_MAGIC);
+      long entry = HistoryDealGetInteger(ticket, DEAL_ENTRY);
+
+      if(sym == InpSymbol && magic == MagicNumber && entry == DEAL_ENTRY_IN)
+         trades++;
+   }
+   return trades;
+}
+
+bool DailyTradeLimitReached()
+{
+   if(!InpUseDailyTradeLimit) return false;
+   if(InpMaxDailyTrades <= 0) return false;
+
+   int todayTrades = CountTodayTrades();
+   if(todayTrades >= InpMaxDailyTrades)
+   {
+      if(DebugLog) Print("[LOCKED] Max daily trades reached: ", todayTrades, "/", InpMaxDailyTrades);
+      return true;
+   }
+   return false;
+}
+
 bool NearSR()
 {
    double h=-DBL_MAX,l=DBL_MAX;
@@ -336,6 +388,12 @@ void CheckEntry()
    if(DailyLossExceeded())
    {
       if(DebugLog) Print("[LOCKED] Daily loss exceeded");
+      return;
+   }
+
+   if(DailyTradeLimitReached())
+   {
+      if(DebugLog) Print("[LOCKED] Daily trade limit reached");
       return;
    }
 
