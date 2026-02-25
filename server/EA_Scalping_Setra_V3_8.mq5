@@ -60,6 +60,10 @@ input int    RangingEMASlopeBars     = 8;
 input double RangingMaxEMASlopePip   = 8.0;
 input int    RangingBodyAvgBars      = 10;
 input double RangingMaxBodyATRMult   = 0.55;
+input bool   UseTransitionChopFilter = true;
+input double TransitionADXMult       = 1.6;
+input double TransitionEMASlopeMult  = 3.0;
+input double TransitionSpanRatioMax  = 1.8;
 
 //--- Magic
 input int MagicNumber = 20251220;
@@ -262,9 +266,13 @@ bool IsRangingMarket()
    double ll = GetLow (PERIOD_M5, bars, 1);
    double span = hh - ll;
 
-   bool rangeCompressed = (span <= (atr * RangingRangeATRMult));
+   double spanMax = atr * RangingRangeATRMult;
+   bool rangeCompressed = (span <= spanMax);
+   double spanRatio = (spanMax > 0.0 ? span / spanMax : 0.0);
+
    double adx = GetADX();
    bool weakTrend = (adx > 0.0 && adx <= RangingMaxADX);
+
    int emaSlopeBars = MathMax(2, RangingEMASlopeBars);
    double emaNow = GetEMA(MathMax(5, RangingEMAPeriod), 1);
    double emaPast = GetEMA(MathMax(5, RangingEMAPeriod), 1 + emaSlopeBars);
@@ -278,22 +286,50 @@ bool IsRangingMarket()
 
    int bodyBars = MathMax(5, RangingBodyAvgBars);
    double avgBody = AvgBody(bodyBars);
-   bool smallBody = (avgBody <= atr * RangingMaxBodyATRMult);
+   double bodyMax = atr * RangingMaxBodyATRMult;
+   bool smallBody = (avgBody <= bodyMax);
+
+   double softADXMax = RangingMaxADX * MathMax(1.0, TransitionADXMult);
+   double softEMAMax = RangingMaxEMASlopePip * MathMax(1.0, TransitionEMASlopeMult);
+   bool transitionChop = false;
+   if(UseTransitionChopFilter && smallBody)
+   {
+      bool softTrend = (adx > 0.0 && adx <= softADXMax);
+      bool softEMA = (emaSlopePip <= softEMAMax);
+      bool nearCompression = (spanRatio <= MathMax(1.0, TransitionSpanRatioMax));
+      transitionChop = ((softTrend && softEMA) || (nearCompression && softEMA));
+   }
 
    int signals = 0;
    if(rangeCompressed) signals++;
    if(weakTrend) signals++;
    if(flatEMA) signals++;
    if(smallBody) signals++;
+   if(transitionChop) signals++;
 
-   int minSignals = MathMax(1, MathMin(4, RangingMinSignals));
+   int minSignals = MathMax(1, MathMin(5, RangingMinSignals));
    bool ranging = (signals >= minSignals);
 
-   if(DebugLog && ranging)
+   if(DebugLog)
    {
-      Print("[NO TRADE] Ranging detected | signals=", signals,
-            " span=", span, " atr=", atr, " adx=", adx,
-            " emaSlopePip=", emaSlopePip, " avgBody=", avgBody);
+      Print("[RANGING CHECK] ranging=", (ranging ? "YES" : "NO"),
+            " signals=", signals, "/", minSignals,
+            " rc=", (rangeCompressed ? "Y" : "N"),
+            " wt=", (weakTrend ? "Y" : "N"),
+            " fe=", (flatEMA ? "Y" : "N"),
+            " sb=", (smallBody ? "Y" : "N"),
+            " tc=", (transitionChop ? "Y" : "N"),
+            " span=", span,
+            " spanMax=", spanMax,
+            " spanRatio=", spanRatio,
+            " adx=", adx,
+            " adxMax=", RangingMaxADX,
+            " softADXMax=", softADXMax,
+            " emaSlopePip=", emaSlopePip,
+            " emaSlopeMax=", RangingMaxEMASlopePip,
+            " softEMAMax=", softEMAMax,
+            " avgBody=", avgBody,
+            " bodyMax=", bodyMax);
    }
 
    return ranging;
