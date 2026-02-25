@@ -76,7 +76,15 @@ datetime SkipTradeUntil = 0;
 
 //=============== UTIL ===================
 double Pip(){
-   return SymbolInfoDouble(InpSymbol, SYMBOL_POINT) * 10.0;
+   double point = SymbolInfoDouble(InpSymbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(InpSymbol, SYMBOL_DIGITS);
+
+   // Forex 5/3-digit symbols use fractional pip quotes.
+   if(digits == 3 || digits == 5)
+      return point * 10.0;
+
+   // Metals/crypto/indices usually use point as practical pip unit.
+   return point;
 }
 
 double GetATR()
