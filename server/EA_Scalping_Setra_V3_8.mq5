@@ -292,12 +292,15 @@ bool IsRangingMarket()
    double softADXMax = RangingMaxADX * MathMax(1.0, TransitionADXMult);
    double softEMAMax = RangingMaxEMASlopePip * MathMax(1.0, TransitionEMASlopeMult);
    bool transitionChop = false;
-   if(UseTransitionChopFilter && smallBody)
+   if(UseTransitionChopFilter)
    {
       bool softTrend = (adx > 0.0 && adx <= softADXMax);
       bool softEMA = (emaSlopePip <= softEMAMax);
       bool nearCompression = (spanRatio <= MathMax(1.0, TransitionSpanRatioMax));
-      transitionChop = ((softTrend && softEMA) || (nearCompression && softEMA));
+
+      // Transitional chop can appear before bodies shrink.
+      transitionChop = ((smallBody && softTrend && softEMA)
+                        || (nearCompression && softTrend));
    }
 
    int signals = 0;
@@ -308,7 +311,8 @@ bool IsRangingMarket()
    if(transitionChop) signals++;
 
    int minSignals = MathMax(1, MathMin(5, RangingMinSignals));
-   bool ranging = (signals >= minSignals);
+   bool transitionOverride = (UseTransitionChopFilter && transitionChop && !smallBody && adx > 0.0 && adx <= softADXMax);
+   bool ranging = (signals >= minSignals) || transitionOverride;
 
    if(DebugLog)
    {
@@ -319,6 +323,7 @@ bool IsRangingMarket()
             " fe=", (flatEMA ? "Y" : "N"),
             " sb=", (smallBody ? "Y" : "N"),
             " tc=", (transitionChop ? "Y" : "N"),
+            " tov=", (transitionOverride ? "Y" : "N"),
             " span=", span,
             " spanMax=", spanMax,
             " spanRatio=", spanRatio,
