@@ -15,6 +15,14 @@ input double BaseMomentumPip   = 40.0;
 input double MomentumATRMult   = 0.45;
 input double MinPipFloor       = 25.0;
 input double MaxWickRatio      = 0.30;
+input bool   UseMomentumWickValidation = true;
+input double MomentumOpenWickMaxRatio  = 0.1;
+input double MomentumCloseWickMinRatio = 0.0;
+input double MomentumCloseWickMaxRatio = 0.30;
+input bool   UseMomentumStructureFilter = true;
+input int    MomentumStructureLookbackBars = 6;
+input bool   UseMomentumExhaustionGuard = true;
+input double MomentumMaxBodyATRMult = 1.8;
 
 //--- SL / TP
 input int    SL_Buffer_Tick = 3;
@@ -87,13 +95,18 @@ double Pip(){
    return point;
 }
 
-double GetATR()
+double GetATR(ENUM_TIMEFRAMES tf)
 {
    static int atrHandle = INVALID_HANDLE;
+   static ENUM_TIMEFRAMES atrTF = (ENUM_TIMEFRAMES)-1;
 
-   if(atrHandle == INVALID_HANDLE)
+   if(atrHandle == INVALID_HANDLE || atrTF != tf)
    {
-      atrHandle = iATR(InpSymbol, PERIOD_M5, 14);
+      if(atrHandle != INVALID_HANDLE)
+         IndicatorRelease(atrHandle);
+
+      atrHandle = iATR(InpSymbol, tf, 14);
+      atrTF = tf;
       if(atrHandle == INVALID_HANDLE)
       {
          Print("ERROR: Failed create ATR handle");
@@ -115,7 +128,7 @@ double AvgBody(int bars)
 {
    double sum=0;
    for(int i=1;i<=bars;i++)
-      sum+=MathAbs(iClose(InpSymbol,PERIOD_M5,i)-iOpen(InpSymbol,PERIOD_M5,i));
+      sum+=MathAbs(iClose(InpSymbol,TF,i)-iOpen(InpSymbol,TF,i));
    return sum/bars;
 }
 
@@ -180,45 +193,91 @@ double CalculateLot(double entry,double sl)
 }
 
 //=============== MOMENTUM ===============
+bool IsMomentumWickValid(bool bullish,double o,double c,double h,double l)
+{
+   if(!UseMomentumWickValidation) return true;
+   double body=MathAbs(c-o);
+   if(body <= 0.0) return false;
+
+   double openWick = bullish ? MathMax(0.0, o-l) : MathMax(0.0, h-o);
+   double closeWick = bullish ? MathMax(0.0, h-c) : MathMax(0.0, c-l);
+
+   double noWickMax = body * MathMax(0.0, MomentumOpenWickMaxRatio);
+   bool openNoWick = (openWick <= noWickMax);
+   bool closeNoWick = (closeWick <= noWickMax);
+
+   bool closeSmallWick = (closeWick >= body * MathMax(0.0, MomentumCloseWickMinRatio)
+                          && closeWick <= body * MathMax(MomentumCloseWickMinRatio, MomentumCloseWickMaxRatio));
+
+   // Valid patterns:
+   // 1) Open no wick + close wick 20-30%
+   // 2) Open and close no wick
+   return ((openNoWick && closeSmallWick) || (openNoWick && closeNoWick));
+}
+
+bool MomentumBreaksStructure(bool bullish,double closePrice)
+{
+   if(!UseMomentumStructureFilter) return true;
+
+   int bars = MathMax(2, MomentumStructureLookbackBars);
+   double hh = GetHigh(TF, bars, 2);
+   double ll = GetLow (TF, bars, 2);
+
+   if(bullish) return (closePrice > hh);
+   return (closePrice < ll);
+}
+
+bool MomentumNotExhausted(double body,double atr)
+{
+   if(!UseMomentumExhaustionGuard) return true;
+   if(atr <= 0.0) return false;
+   return (body <= atr * MomentumMaxBodyATRMult);
+}
+
 bool MomentumBull(double &body)
 {
-   double o=iOpen(InpSymbol,PERIOD_M5,1);
-   double c=iClose(InpSymbol,PERIOD_M5,1);
-   double h=iHigh(InpSymbol,PERIOD_M5,1);
-   double l=iLow (InpSymbol,PERIOD_M5,1);
+   double o=iOpen(InpSymbol,TF,1);
+   double c=iClose(InpSymbol,TF,1);
+   double h=iHigh(InpSymbol,TF,1);
+   double l=iLow (InpSymbol,TF,1);
 
    body=MathAbs(c-o);
-   double wick=(h-MathMax(o,c))+(MathMin(o,c)-l);
-
-   double atr=GetATR();
+   double atr=GetATR(TF);
    double minBody=MathMax(MinPipFloor*Pip(),atr*MomentumATRMult);
 
-   return (c>o && body>=minBody && wick/(body+wick)<=MaxWickRatio);
+   return (c>o && body>=minBody && IsMomentumWickValid(true,o,c,h,l)
+           && MomentumBreaksStructure(true,c)
+           && MomentumNotExhausted(body,atr));
 }
 
 bool MomentumBear(double &body)
 {
-   double o=iOpen(InpSymbol,PERIOD_M5,1);
-   double c=iClose(InpSymbol,PERIOD_M5,1);
-   double h=iHigh(InpSymbol,PERIOD_M5,1);
-   double l=iLow (InpSymbol,PERIOD_M5,1);
+   double o=iOpen(InpSymbol,TF,1);
+   double c=iClose(InpSymbol,TF,1);
+   double h=iHigh(InpSymbol,TF,1);
+   double l=iLow (InpSymbol,TF,1);
 
    body=MathAbs(o-c);
-   double wick=(h-MathMax(o,c))+(MathMin(o,c)-l);
-
-   double atr=GetATR();
+   double atr=GetATR(TF);
    double minBody=MathMax(MinPipFloor*Pip(),atr*MomentumATRMult);
 
-   return (c<o && body>=minBody && wick/(body+wick)<=MaxWickRatio);
+   return (c<o && body>=minBody && IsMomentumWickValid(false,o,c,h,l)
+           && MomentumBreaksStructure(false,c)
+           && MomentumNotExhausted(body,atr));
 }
 
 double GetADX()
 {
    static int adxHandle = INVALID_HANDLE;
+   static ENUM_TIMEFRAMES adxTF = (ENUM_TIMEFRAMES)-1;
 
-   if(adxHandle == INVALID_HANDLE)
+   if(adxHandle == INVALID_HANDLE || adxTF != TF)
    {
-      adxHandle = iADX(InpSymbol, PERIOD_M5, 14);
+      if(adxHandle != INVALID_HANDLE)
+         IndicatorRelease(adxHandle);
+
+      adxHandle = iADX(InpSymbol, TF, 14);
+      adxTF = TF;
       if(adxHandle == INVALID_HANDLE)
       {
          Print("ERROR: Failed create ADX handle");
@@ -240,11 +299,16 @@ double GetEMA(int period,int shift)
 {
    static int emaHandle = INVALID_HANDLE;
    static int emaPeriod = -1;
+   static ENUM_TIMEFRAMES emaTF = (ENUM_TIMEFRAMES)-1;
 
-   if(emaHandle == INVALID_HANDLE || emaPeriod != period)
+   if(emaHandle == INVALID_HANDLE || emaPeriod != period || emaTF != TF)
    {
-      emaHandle = iMA(InpSymbol, PERIOD_M5, period, 0, MODE_EMA, PRICE_CLOSE);
+      if(emaHandle != INVALID_HANDLE)
+         IndicatorRelease(emaHandle);
+
+      emaHandle = iMA(InpSymbol, TF, period, 0, MODE_EMA, PRICE_CLOSE);
       emaPeriod = period;
+      emaTF = TF;
       if(emaHandle == INVALID_HANDLE)
       {
          Print("ERROR: Failed create EMA handle");
@@ -266,12 +330,12 @@ bool IsRangingMarket()
 {
    if(!UseRangingFilter) return false;
 
-   double atr = GetATR();
+   double atr = GetATR(TF);
    if(atr <= 0.0) return false;
 
    int bars = MathMax(5, RangingLookbackBars);
-   double hh = GetHigh(PERIOD_M5, bars, 1);
-   double ll = GetLow (PERIOD_M5, bars, 1);
+   double hh = GetHigh(TF, bars, 1);
+   double ll = GetLow (TF, bars, 1);
    double span = hh - ll;
 
    double spanMax = atr * RangingRangeATRMult;
@@ -468,7 +532,7 @@ void CheckEntry()
       return;
    }
 
-   double atr=GetATR();
+   double atr=GetATR(TF);
    double srDist=MathMin(SR_Pip_Input*Pip(),atr*SR_ATR_Mult);
 
    //bool nearSR=false;
@@ -479,8 +543,8 @@ void CheckEntry()
       return;
    }
 
-   double srH=GetHigh(PERIOD_M5,SR_Lookback,2);
-   double srL=GetLow (PERIOD_M5,SR_Lookback,2);
+   double srH=GetHigh(TF,SR_Lookback,2);
+   double srL=GetLow (TF,SR_Lookback,2);
 
    double ask=SymbolInfoDouble(InpSymbol,SYMBOL_ASK);
    double bid=SymbolInfoDouble(InpSymbol,SYMBOL_BID);
@@ -501,8 +565,8 @@ void CheckEntry()
       }
    }
 
-   double high=iHigh(InpSymbol,PERIOD_M5,1);
-   double low =iLow (InpSymbol,PERIOD_M5,1);
+   double high=iHigh(InpSymbol,TF,1);
+   double low =iLow (InpSymbol,TF,1);
    double buffer=SL_Buffer_Tick*SymbolInfoDouble(InpSymbol,SYMBOL_POINT);
 
    if(bull)
