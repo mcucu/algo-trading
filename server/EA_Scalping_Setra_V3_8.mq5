@@ -79,6 +79,7 @@ input int MagicNumber = 20251220;
 //=============== GLOBAL =================
 datetime lastBarTime=0;
 double DayStartBalance = 0;
+datetime CurrentDayStart = 0;
 int ConsecutiveSLCount = 0;
 datetime SkipTradeUntil = 0;
 
@@ -245,9 +246,29 @@ bool MomentumBull(double &body)
    double atr=GetATR(TF);
    double minBody=MathMax(MinPipFloor*Pip(),atr*MomentumATRMult);
 
-   return (c>o && body>=minBody && IsMomentumWickValid(true,o,c,h,l)
-           && MomentumBreaksStructure(true,c)
-           && MomentumNotExhausted(body,atr));
+   bool dirOk = (c>o);
+   bool sizeOk = (body>=minBody);
+   bool wickOk = IsMomentumWickValid(true,o,c,h,l);
+   bool structureOk = MomentumBreaksStructure(true,c);
+   bool exhaustOk = MomentumNotExhausted(body,atr);
+   bool pass = (dirOk && sizeOk && wickOk && structureOk && exhaustOk);
+
+   if(DebugLog)
+   {
+      double bodyPip = (Pip() > 0.0 ? body / Pip() : 0.0);
+      double minBodyPip = (Pip() > 0.0 ? minBody / Pip() : 0.0);
+      Print("[MOMO BULL] pass=", (pass ? "Y" : "N"),
+            " dir=", (dirOk ? "Y" : "N"),
+            " size=", (sizeOk ? "Y" : "N"),
+            " wick=", (wickOk ? "Y" : "N"),
+            " bos=", (structureOk ? "Y" : "N"),
+            " exh=", (exhaustOk ? "Y" : "N"),
+            " bodyPip=", bodyPip,
+            " minBodyPip=", minBodyPip,
+            " atr=", atr);
+   }
+
+   return pass;
 }
 
 bool MomentumBear(double &body)
@@ -261,9 +282,29 @@ bool MomentumBear(double &body)
    double atr=GetATR(TF);
    double minBody=MathMax(MinPipFloor*Pip(),atr*MomentumATRMult);
 
-   return (c<o && body>=minBody && IsMomentumWickValid(false,o,c,h,l)
-           && MomentumBreaksStructure(false,c)
-           && MomentumNotExhausted(body,atr));
+   bool dirOk = (c<o);
+   bool sizeOk = (body>=minBody);
+   bool wickOk = IsMomentumWickValid(false,o,c,h,l);
+   bool structureOk = MomentumBreaksStructure(false,c);
+   bool exhaustOk = MomentumNotExhausted(body,atr);
+   bool pass = (dirOk && sizeOk && wickOk && structureOk && exhaustOk);
+
+   if(DebugLog)
+   {
+      double bodyPip = (Pip() > 0.0 ? body / Pip() : 0.0);
+      double minBodyPip = (Pip() > 0.0 ? minBody / Pip() : 0.0);
+      Print("[MOMO BEAR] pass=", (pass ? "Y" : "N"),
+            " dir=", (dirOk ? "Y" : "N"),
+            " size=", (sizeOk ? "Y" : "N"),
+            " wick=", (wickOk ? "Y" : "N"),
+            " bos=", (structureOk ? "Y" : "N"),
+            " exh=", (exhaustOk ? "Y" : "N"),
+            " bodyPip=", bodyPip,
+            " minBodyPip=", minBodyPip,
+            " atr=", atr);
+   }
+
+   return pass;
 }
 
 double GetADX()
@@ -415,6 +456,7 @@ bool IsRangingMarket()
 bool DailyLossExceeded()
 {
    if(!InpUseDailyLossLock) return false;
+   if(DayStartBalance <= 0.0) return false;
 
    double equity = AccountInfoDouble(ACCOUNT_EQUITY);
    double dd = (DayStartBalance - equity) / DayStartBalance * 100.0;
@@ -430,6 +472,20 @@ datetime GetDayStart(datetime t)
    dt.sec  = 0;
    return StructToTime(dt);
 }
+
+void RefreshDailyBaseline()
+{
+   datetime dayStart = GetDayStart(TimeCurrent());
+   if(CurrentDayStart != dayStart)
+   {
+      CurrentDayStart = dayStart;
+      DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+      if(DebugLog)
+         Print("[DAILY RESET] dayStart=", TimeToString(CurrentDayStart, TIME_DATE),
+               " balance=", DayStartBalance);
+   }
+}
+
 
 int CountTodayTrades()
 {
@@ -497,6 +553,7 @@ void CheckEntry()
       }
       return;
    }
+   RefreshDailyBaseline();
 
    if(DailyLossExceeded())
    {
@@ -601,7 +658,12 @@ void CheckEntry()
 //=============== EVENTS =================
 int OnInit()
 {
+   CurrentDayStart = GetDayStart(TimeCurrent());
    DayStartBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+   if(DebugLog)
+      Print("[INIT] dayStart=", TimeToString(CurrentDayStart, TIME_DATE),
+            " balance=", DayStartBalance);
 
    trade.SetExpertMagicNumber(MagicNumber);
    return INIT_SUCCEEDED;
