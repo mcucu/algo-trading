@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
-//| EA Hybrid v5.2 FINAL                                          |
+//| EA Hybrid V5                                                   |
 //| State-Based Day Trading Engine                                   |
 //| TREND IMPULSE / TREND PULLBACK / RANGE                            |
 //| + HTF Direction Lock + Structure Protection                      |
 //| Platform : MetaTrader 5 (MQL5 Native)                            |
 //+------------------------------------------------------------------+
 #property strict
-#property version "5.2"
+#property version "5.4"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -57,6 +57,25 @@ input int    MaxTradesDay = 3;
 input double MaxDailyLossPercent = 4.0;
 input int    CooldownMinutes = 15;
 input int    MaxOpenPositions = 1;
+input bool   EnableSpreadFilter = true;
+input double MaxSpreadPoints = 80;
+
+// --- Reversal Protection
+input bool   EnablePanicExit = true;
+input double PanicATR = 1.5;
+input bool   EnableLossStreakLock = true;
+input int    LossStreakLimit = 2;
+input int    LossLockHours = 8;
+
+// --- HTF Range + LTF Breakout-Retest
+input bool   EnableHTFRangeLTFBreakout = true;
+input ENUM_TIMEFRAMES HTF_RangeTF1 = PERIOD_D1;
+input ENUM_TIMEFRAMES HTF_RangeTF2 = PERIOD_H4;
+input bool   RequireBothHTFConsolidating = true;
+input int    HTF_RangeLookbackBars = 20;
+input double HTF_MaxWidthATR = 6.0;
+input double HTF_ADX_Max = 22.0;
+input bool   RequireBreakoutRetest = true;
 
 // --- Session
 input int StartHour = 7;
@@ -85,11 +104,15 @@ enum MARKET_STATE
 {
    STATE_TREND_IMPULSE = 0,
    STATE_TREND_PULLBACK = 1,
-   STATE_RANGE = 2
+   STATE_RANGE = 2,
+   STATE_HTF_RANGE_LTF_BREAKOUT = 3
 };
 
 //========================= GLOBAL ==================================
 int hATR_H1, hADX_H1;
+int hATR_CUR;
+int hATR_RTF1, hADX_RTF1;
+int hATR_RTF2, hADX_RTF2;
 int hEMA_HTF;
 int hEMA20, hEMA50, hEMA200;
 int hRSI;
@@ -98,6 +121,8 @@ datetime lastBar=0, lastTradeTime=0;
 int tradesToday=0, lastDay=-1;
 double dayStartEquity=0;
 bool tradingLocked=false;
+int consecutiveLosses=0;
+datetime lossLockUntil=0;
 
 string GV_BE_PREFIX = "BE_";
 string GV_PT_PREFIX = "PT_";
@@ -113,6 +138,11 @@ int OnInit()
 
    hATR_H1 = iATR(_Symbol, HTF, ATR_Period);
    hADX_H1 = iADX(_Symbol, HTF, ADX_Period);
+   hATR_CUR = iATR(_Symbol, _Period, ATR_Period);
+   hATR_RTF1 = iATR(_Symbol, HTF_RangeTF1, ATR_Period);
+   hADX_RTF1 = iADX(_Symbol, HTF_RangeTF1, ADX_Period);
+   hATR_RTF2 = iATR(_Symbol, HTF_RangeTF2, ATR_Period);
+   hADX_RTF2 = iADX(_Symbol, HTF_RangeTF2, ADX_Period);
    hEMA_HTF = iMA(_Symbol,HTF,EMA_Mid,0,MODE_EMA,PRICE_CLOSE);
 
    hEMA20  = iMA(_Symbol,_Period,EMA_Fast,0,MODE_EMA,PRICE_CLOSE);
@@ -122,6 +152,9 @@ int OnInit()
    hRSI = iRSI(_Symbol,_Period,RSI_Period,PRICE_CLOSE);
 
    if(hATR_H1==INVALID_HANDLE || hADX_H1==INVALID_HANDLE ||
+      hATR_CUR==INVALID_HANDLE ||
+      hATR_RTF1==INVALID_HANDLE || hADX_RTF1==INVALID_HANDLE ||
+      hATR_RTF2==INVALID_HANDLE || hADX_RTF2==INVALID_HANDLE ||
       hEMA_HTF==INVALID_HANDLE ||
       hEMA20==INVALID_HANDLE || hEMA50==INVALID_HANDLE ||
       hEMA200==INVALID_HANDLE || hRSI==INVALID_HANDLE)
@@ -137,6 +170,11 @@ void OnDeinit(const int reason)
 {
    IndicatorRelease(hATR_H1);
    IndicatorRelease(hADX_H1);
+   IndicatorRelease(hATR_CUR);
+   IndicatorRelease(hATR_RTF1);
+   IndicatorRelease(hADX_RTF1);
+   IndicatorRelease(hATR_RTF2);
+   IndicatorRelease(hADX_RTF2);
    IndicatorRelease(hEMA_HTF);
    IndicatorRelease(hEMA20);
    IndicatorRelease(hEMA50);
@@ -173,6 +211,65 @@ void LogSkip(string reason)
       Print("⏭️ SKIP | ",reason);
       lastSkipReason=reason;
    }
+}
+
+bool SpreadOK()
+{
+   if(!EnableSpreadFilter) return true;
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   if(ask<=0 || bid<=0) return false;
+   double spreadPts=(ask-bid)/_Point;
+   if(spreadPts>MaxSpreadPoints)
+   {
+      LogSkip("Spread too high");
+      return false;
+   }
+   return true;
+}
+
+bool LossStreakLocked()
+{
+   if(!EnableLossStreakLock) return false;
+   return (TimeCurrent()<lossLockUntil);
+}
+
+double TFRangeWidth(ENUM_TIMEFRAMES tf,int lookback,int startShift=1)
+{
+   if(lookback<1) return 0;
+   double hi=iHigh(_Symbol,tf,startShift);
+   double lo=iLow(_Symbol,tf,startShift);
+
+   for(int i=startShift+1;i<startShift+lookback;i++)
+   {
+      double h=iHigh(_Symbol,tf,i);
+      double l=iLow(_Symbol,tf,i);
+      if(h>hi) hi=h;
+      if(l<lo) lo=l;
+   }
+   return hi-lo;
+}
+
+bool IsTFConsolidating(ENUM_TIMEFRAMES tf,int hAtr,int hAdx)
+{
+   double atr=BUF(hAtr,0,1);
+   double adx=BUF(hAdx,0,1);
+   if(atr<=0 || adx<=0) return false;
+
+   double width=TFRangeWidth(tf,HTF_RangeLookbackBars,1);
+   if(width<=0) return false;
+
+   if(adx>HTF_ADX_Max) return false;
+   if(width>HTF_MaxWidthATR*atr) return false;
+   return true;
+}
+
+bool IsHTFConsolidating()
+{
+   if(!EnableHTFRangeLTFBreakout) return false;
+   bool tf1=IsTFConsolidating(HTF_RangeTF1,hATR_RTF1,hADX_RTF1);
+   bool tf2=IsTFConsolidating(HTF_RangeTF2,hATR_RTF2,hADX_RTF2);
+   return RequireBothHTFConsolidating ? (tf1 && tf2) : (tf1 || tf2);
 }
 
 //========================= HTF & STRUCTURE =========================
@@ -250,6 +347,36 @@ bool DailyLossExceeded()
    return false;
 }
 
+void PanicExit()
+{
+   if(!EnablePanicExit) return;
+
+   double atr = BUF(hATR_CUR,0,1);
+   if(atr<=0) return;
+
+   double candle = MathAbs(iClose(_Symbol,_Period,1)-iOpen(_Symbol,_Period,1));
+   if(candle < PanicATR * atr) return;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket)) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=MagicNumber) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+
+      if(trade.PositionClose(ticket))
+      {
+         Print("PANIC EXIT | Ticket:",ticket);
+      }
+      else
+      {
+         Print("Panic close failed | Ticket:",ticket,
+               " | Retcode:",trade.ResultRetcode(),
+               " | ",trade.ResultRetcodeDescription());
+      }
+   }
+}
+
 //========================= MARKET STATE ============================
 MARKET_STATE DetectMarketState()
 {
@@ -257,7 +384,11 @@ MARKET_STATE DetectMarketState()
    double adx = BUF(hADX_H1,0,1);
 
    if(atr/_Point < MinATR_HTF_Points || adx < ADX_Weak)
+   {
+      if(IsHTFConsolidating())
+         return STATE_HTF_RANGE_LTF_BREAKOUT;
       return STATE_RANGE;
+   }
 
    if(adx >= ADX_Strong)
       return STATE_TREND_IMPULSE;
@@ -598,6 +729,105 @@ void TradeRangeBreakout()
    LogSkip("Waiting for range breakout");
 }
 
+void GetRangeBoxFromShift(int bars,int firstShift,double &hi,double &lo)
+{
+   if(bars<1) bars=1;
+   hi=iHigh(_Symbol,_Period,firstShift);
+   lo=iLow(_Symbol,_Period,firstShift);
+   for(int i=firstShift+1;i<firstShift+bars;i++)
+   {
+      double h=iHigh(_Symbol,_Period,i);
+      double l=iLow(_Symbol,_Period,i);
+      if(h>hi) hi=h;
+      if(l<lo) lo=l;
+   }
+}
+
+void TradeHTFRangeLTFBreakoutRetest()
+{
+   if(!EnableHTFRangeLTFBreakout)
+   {
+      LogSkip("HTF range breakout mode disabled");
+      return;
+   }
+
+   if(!IsHTFConsolidating())
+   {
+      LogSkip("HTF not consolidating");
+      return;
+   }
+
+   double atr=BUF(hATR_CUR,0,1);
+   if(atr<=0)
+   {
+      LogSkip("ATR current TF not ready");
+      return;
+   }
+
+   double boxHigh=0, boxLow=0;
+   // Range source excludes bars 1-2 to validate breakout then retest.
+   GetRangeBoxFromShift(RangeLookbackBars,3,boxHigh,boxLow);
+
+   double buffer=atr*RangeBreakBufferATR;
+   double c2=iClose(_Symbol,_Period,2);
+   double c1=iClose(_Symbol,_Period,1);
+   double l1=iLow(_Symbol,_Period,1);
+   double h1=iHigh(_Symbol,_Period,1);
+
+   bool breakoutBuy=c2>(boxHigh+buffer);
+   bool breakoutSell=c2<(boxLow-buffer);
+
+   bool retestBuy=true;
+   bool retestSell=true;
+   if(RequireBreakoutRetest)
+   {
+      retestBuy=(l1<=(boxHigh+buffer) && c1>(boxHigh+buffer));
+      retestSell=(h1>=(boxLow-buffer) && c1<(boxLow-buffer));
+   }
+
+   if(breakoutBuy && retestBuy)
+   {
+      double entry=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      double sl=boxLow-buffer;
+      double tp=entry+(entry-sl)*RR_Range;
+      double lot=CalcLot(RangeRiskPercent,entry,sl);
+      if(lot>0 && trade.Buy(lot,_Symbol,entry,sl,tp))
+      {
+         tradesToday++;
+         lastTradeTime=TimeCurrent();
+         Print("HTF RANGE LTF BREAKOUT BUY");
+      }
+      else if(lot>0)
+      {
+         Print("HTF range BUY failed | Retcode:",trade.ResultRetcode(),
+               " | ",trade.ResultRetcodeDescription());
+      }
+      return;
+   }
+
+   if(breakoutSell && retestSell)
+   {
+      double entry=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      double sl=boxHigh+buffer;
+      double tp=entry-(sl-entry)*RR_Range;
+      double lot=CalcLot(RangeRiskPercent,entry,sl);
+      if(lot>0 && trade.Sell(lot,_Symbol,entry,sl,tp))
+      {
+         tradesToday++;
+         lastTradeTime=TimeCurrent();
+         Print("HTF RANGE LTF BREAKOUT SELL");
+      }
+      else if(lot>0)
+      {
+         Print("HTF range SELL failed | Retcode:",trade.ResultRetcode(),
+               " | ",trade.ResultRetcodeDescription());
+      }
+      return;
+   }
+
+   LogSkip("Waiting HTF-range breakout-retest");
+}
+
 int CountPosition()
 {
    int pos=0;
@@ -616,10 +846,55 @@ int CountPosition()
    return pos;
 }
 
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+{
+   (void)request;
+   (void)result;
+
+   if(!EnableLossStreakLock) return;
+   if(trans.type!=TRADE_TRANSACTION_DEAL_ADD || trans.deal==0) return;
+   if(!HistorySelect(TimeCurrent()-86400*30,TimeCurrent())) return;
+
+   ulong deal=trans.deal;
+   if((ulong)HistoryDealGetInteger(deal,DEAL_MAGIC)!=MagicNumber) return;
+   if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol) return;
+
+   long entryType=HistoryDealGetInteger(deal,DEAL_ENTRY);
+   if(entryType!=DEAL_ENTRY_OUT && entryType!=DEAL_ENTRY_OUT_BY) return;
+
+   double net=HistoryDealGetDouble(deal,DEAL_PROFIT)+
+              HistoryDealGetDouble(deal,DEAL_SWAP)+
+              HistoryDealGetDouble(deal,DEAL_COMMISSION);
+
+   if(net<0)
+   {
+      consecutiveLosses++;
+      Print("Loss streak | count=",consecutiveLosses,
+            " | net=",DoubleToString(net,2));
+   }
+   else if(net>0)
+   {
+      if(consecutiveLosses>0)
+         Print("Loss streak reset by winning trade | net=",DoubleToString(net,2));
+      consecutiveLosses=0;
+   }
+
+   if(consecutiveLosses>=LossStreakLimit)
+   {
+      lossLockUntil=TimeCurrent()+LossLockHours*3600;
+      Print("LOSS STREAK LOCK | until ",
+            TimeToString(lossLockUntil,TIME_DATE|TIME_MINUTES));
+      consecutiveLosses=0;
+   }
+}
+
 //========================= ONTICK ================================
 void OnTick()
 {
    CheckDailyReset();
+   PanicExit();
    if(tradingLocked || DailyLossExceeded())
    {
       LogSkip("Daily lock");
@@ -630,6 +905,7 @@ void OnTick()
 
    if(!IsNewBar()){ LogSkip("Not new bar"); return; }
    if(!InSession()){ LogSkip("Out of session"); return; }
+   if(LossStreakLocked()){ LogSkip("Loss streak lock"); return; }
    if(tradesToday>=MaxTradesDay){ LogSkip("Max trades"); return; }
    if(TimeCurrent()-lastTradeTime < CooldownMinutes*60)
    {
@@ -641,10 +917,12 @@ void OnTick()
       LogSkip("Position limit");
       return;
    }
+   if(!SpreadOK()) return;
 
    MARKET_STATE state = DetectMarketState();
 
-   if(state==STATE_TREND_IMPULSE)      TradeTrendImpulse();
-   else if(state==STATE_TREND_PULLBACK) TradeTrendPullback();
-   else                                TradeRangeBreakout();
+   if(state==STATE_TREND_IMPULSE)            TradeTrendImpulse();
+   else if(state==STATE_TREND_PULLBACK)      TradeTrendPullback();
+   else if(state==STATE_HTF_RANGE_LTF_BREAKOUT) TradeHTFRangeLTFBreakoutRetest();
+   else                                      TradeRangeBreakout();
 }

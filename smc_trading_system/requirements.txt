@@ -1,0 +1,7 @@
+MetaTrader5
+pandas
+numpy
+opencv-python
+matplotlib
+schedule
+pytz
