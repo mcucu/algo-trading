@@ -55,6 +55,8 @@ input double PartialPct_Pullback = 40;
 // --- Risk Control
 input int    MaxTradesDay = 3;
 input double MaxDailyLossPercent = 4.0;
+input bool   EnableDailyProfitTargetLock = true;
+input double DailyProfitTargetPercent = 3.0;
 input int    CooldownMinutes = 15;
 input int    MaxOpenPositions = 1;
 input bool   EnableSpreadFilter = true;
@@ -342,6 +344,22 @@ bool DailyLossExceeded()
    {
       tradingLocked=true;
       Print("🛑 DAILY LOCK");
+      return true;
+   }
+   return false;
+}
+
+bool DailyProfitTargetReached()
+{
+   if(!EnableDailyProfitTargetLock) return false;
+   if(dayStartEquity<=0) return false;
+
+   double gain=(AccountInfoDouble(ACCOUNT_EQUITY)-dayStartEquity)
+               /dayStartEquity*100.0;
+   if(gain>=DailyProfitTargetPercent)
+   {
+      tradingLocked=true;
+      Print("🎯 DAILY TARGET LOCK");
       return true;
    }
    return false;
@@ -850,8 +868,10 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
                         const MqlTradeRequest& request,
                         const MqlTradeResult& result)
 {
-   (void)request;
-   (void)result;
+   // Keep parameters explicitly used for MQL5 compiler compatibility.
+   long _reqAction=(long)request.action;
+   uint _resRetcode=(uint)result.retcode;
+   if(_reqAction==-1 && _resRetcode==0xFFFFFFFF) return;
 
    if(!EnableLossStreakLock) return;
    if(trans.type!=TRADE_TRANSACTION_DEAL_ADD || trans.deal==0) return;
@@ -895,7 +915,7 @@ void OnTick()
 {
    CheckDailyReset();
    PanicExit();
-   if(tradingLocked || DailyLossExceeded())
+   if(tradingLocked || DailyLossExceeded() || DailyProfitTargetReached())
    {
       LogSkip("Daily lock");
       return;

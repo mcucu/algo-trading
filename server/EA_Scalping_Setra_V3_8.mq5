@@ -51,8 +51,16 @@ input double HTF_Bypass_Mult    = 1.2;
 // --- Daily Loss Lock
 input bool   InpUseDailyLossLock = true;
 input double InpMaxDailyLossPercent = 3.0;
+input bool   InpUseDailyProfitTargetLock = true;
+input double InpDailyProfitTargetPercent = 3.0;
 input bool   InpUseDailyTradeLimit = true;
 input int    InpMaxDailyTrades     = 8;
+
+// --- Session
+input bool  UseSessionFilter = true;
+input int StartHour = 7;
+input int EndHour   = 22;
+
 
 //--- Debug
 input bool   DebugLog           = true;
@@ -463,6 +471,16 @@ bool DailyLossExceeded()
    return (dd >= InpMaxDailyLossPercent);
 }
 
+bool DailyProfitTargetReached()
+{
+   if(!InpUseDailyProfitTargetLock) return false;
+   if(DayStartBalance <= 0.0) return false;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double gain = (equity - DayStartBalance) / DayStartBalance * 100.0;
+   return (gain >= InpDailyProfitTargetPercent);
+}
+
 datetime GetDayStart(datetime t)
 {
    MqlDateTime dt;
@@ -540,6 +558,13 @@ bool NearSR()
    return (MathAbs(price-h)<=buf || MathAbs(price-l)<=buf);
 }
 
+bool InSession()
+{
+   if(!UseSessionFilter) return true;
+   MqlDateTime t; TimeToStruct(TimeCurrent(),t);
+   return (t.hour>=StartHour && t.hour<=EndHour);
+}
+
 //=============== ENTRY ==================
 void CheckEntry()
 {
@@ -554,10 +579,21 @@ void CheckEntry()
       return;
    }
    RefreshDailyBaseline();
+   
+   if(!InSession()) {
+      if(DebugLog) Print("[NO TRADE] Out of session");
+      return;
+   }
 
    if(DailyLossExceeded())
    {
       if(DebugLog) Print("[LOCKED] Daily loss exceeded");
+      return;
+   }
+
+   if(DailyProfitTargetReached())
+   {
+      if(DebugLog) Print("[LOCKED] Daily profit target reached");
       return;
    }
 
