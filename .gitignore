@@ -36,6 +36,7 @@ Makefile
 .env.test.local
 .env.production.local
 .env.local
+.venv/
 
 # temp directory
 .temp
